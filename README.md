@@ -8,15 +8,31 @@ Serial data logging utility for ESP32 motor testing (ME481).
 - Automatically saves test runs into incrementing CSV logs (`ME481_MotorTest_xxx.csv`)
 - Captures `Time_ms`, `PWM`, `EncoderCount`, and `Current_A`
 
+- Plots each run automatically once logging stops
+
 ## Requirements
 - Python 3.x
-- `pyserial`
+- `pyserial` (logging), `matplotlib` + `numpy` (plots)
 
 ```bash
-pip install pyserial
+pip install pyserial matplotlib numpy
 ```
 
 ## Usage
 ```bash
-python3 serialreader.py
+python3 serialreader.py                 # log a run, then plot it
+python3 serialreader.py --plot          # re-plot the most recent log
+python3 serialreader.py --plot FILE.csv # re-plot a specific log
 ```
+
+Plots land in `Data/Plots/<run name>/`:
+
+| File | Shows |
+|---|---|
+| `01_overview.png` | PWM, encoder count, speed and current on one time axis |
+| `02_step_response.png` | The first motor-on step, with steady-state speed and time constant |
+| `03_current_vs_speed.png` | Current against speed while driven |
+| `04_steady_state_vs_pwm.png` | Steady-state speed and current per PWM level (runs with 2+ levels) |
+| `05_sample_interval.png` | Logging rate and any stalls |
+
+Set `COUNTS_PER_REV` at the top of `serialreader.py` to plot rev/min instead of counts/s.
