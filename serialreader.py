@@ -12,13 +12,13 @@ import time
 import threading
 
 PORT = "/dev/cu.usbserial-0001"
-BAUD = 115200
+BAUD = 921600
 STOP_DELAY_S = 3.0   # how long to keep logging after MOTOR_OFF
 BOOT_DELAY_S = 2.0   # opening the port resets the ESP32; let it finish booting
 AUTO_START = ""      # set to "s" to start automatically instead of typing it
 
 OUT_DIR = "/Users/nicksambrano/Desktop/Serial Reader/Data"
-BASE_NAME = "ME481_MotorTest"   # files become ME481_MotorTest_001.csv, _002.csv, ...
+BASE_NAME = "FunctionalRun"   # files become ME481_MotorTest_001.csv, _002.csv, ...
 
 # Must match the sketch's data line: Serial.print(millis(), pwm, count, current).
 # If you re-enable the cs_raw_avg print in main.cpp, append "CS_Raw_Avg" here.
@@ -27,7 +27,18 @@ COLUMNS = ["Time_ms", "PWM", "EncoderCount", "Current_A"]
 # --- plotting -----------------------------------------------------------
 MAKE_PLOTS = True          # set False to log only
 PLOTS_DIRNAME = "Plots"    # created next to the CSV, one subfolder per run
-COUNTS_PER_REV = None      # encoder counts per output revolution; None -> plot counts/s
+# Pololu #4843: 20.4:1 metal gearmotor, 25Dx65L mm, HP 12 V, 48 CPR encoder.
+# Pololu quotes the 48 CPR on the *motor* shaft and already counts all four
+# quadrature edges, which is how the sketch reads it (ESP32Encoder's
+# attachFullQuad in main.cpp), so counts/rev of the output shaft is just that
+# figure times the gear ratio. Pololu's exact-ratio figure for this gearbox is
+# ~979.62 rather than the catalogue 20.4 x 48 = 979.2; the two differ by 0.04%,
+# so use whichever your write-up cites.
+ENCODER_CPR = 48.0         # counts per motor-shaft revolution, all four edges
+GEAR_RATIO = 20.4          # gearbox reduction, motor shaft : output shaft
+COUNTS_PER_REV = ENCODER_CPR * GEAR_RATIO   # = 979.2 counts per output rev
+                           # Set to None to fall back to raw counts and counts/s.
+PWM_FULL_SCALE = 255.0     # value the sketch writes for 100% duty; None -> no duty axis
 SPEED_WINDOW_MS = 50.0     # width of the window the speed is fitted over.
                            # The sketch stalls for ~10 ms every ~25 ms and stamps
                            # the caught-up counts onto one row, so windows much
@@ -254,6 +265,19 @@ def speed_units(speed_counts):
     if COUNTS_PER_REV:
         return speed_counts / COUNTS_PER_REV * 60.0, "Speed (rev/min)"
     return speed_counts, "Speed (counts/s)"
+
+
+def angle_series(count):
+    """Shaft angle relative to the start of the run.
+
+    Degrees once the encoder resolution is known; until then the raw counts are
+    the angle in the only unit the log actually carries, so the plot is drawn
+    either way and just says which one it is.
+    """
+    zeroed = count - count[0]
+    if COUNTS_PER_REV:
+        return zeroed / COUNTS_PER_REV * 360.0, "Motor angle (deg)"
+    return zeroed, "Motor angle (counts)"
 
 
 def on_segments(t, pwm):
@@ -519,6 +543,107 @@ def plot_encoder_count(run, segments, outdir):
     return _save(fig, outdir, "06_encoder_count")
 
 
+def _headroom(ax, frac=0.16):
+    """Open a strip of blank axes above the data for a one-line note.
+
+    The note is long enough to cross most of the figure, so picking the emptier
+    corner is not enough - a pulse that peaks mid-run and settles low leaves
+    neither corner clear. Making room is the one placement that always works.
+    Call it before any twinned axis, which copies these limits.
+    """
+    lo, hi = ax.get_ylim()
+    ax.set_ylim(lo, hi + frac * (hi - lo))
+
+
+def _note(ax, text):
+    ax.annotate(text, xy=(0.99, 0.94), xycoords="axes fraction", ha="right",
+                va="top", color=INK_MUTED, fontsize=8)
+
+
+def plot_pwm(run, segments, outdir):
+    """Commanded PWM against time, on its own.
+
+    The overview stacks this against three other channels, which hides how long
+    each command was actually held; here the drive is the whole figure and the
+    on-stretches are measured off the log rather than off what was asked for.
+    """
+    t = run["t"]
+    pwm = run["pwm"]
+
+    fig, (ax,) = _figure(1, height=4.2)
+    ax.plot(t, pwm, color=C_PWM, lw=1.6, drawstyle="steps-post")
+    _style_axes(ax, "PWM command")
+    ax.set_xlabel("Time (s)", color=INK, fontsize=9)
+    ax.set_title(f"{run['name']} - PWM vs time", loc="left", color=INK,
+                 fontsize=11, pad=10)
+    _shade_on(ax, t, segments)
+    _headroom(ax)
+
+    # Same trace read as duty cycle, so the number means something off-rig.
+    if PWM_FULL_SCALE:
+        ax2 = ax.twinx()
+        lo, hi = ax.get_ylim()
+        ax2.set_ylim(lo / PWM_FULL_SCALE * 100.0, hi / PWM_FULL_SCALE * 100.0)
+        _style_axes(ax2, "Duty cycle (%)")
+        ax2.grid(False)
+
+    if segments:
+        on_time = sum(t[min(b, t.size - 1)] - t[a] for a, b in segments)
+        levels = sorted({float(v) for v in pwm if v != 0})
+        shown = ", ".join(f"{lv:.0f}" for lv in levels[:4])
+        if len(levels) > 4:
+            shown += ", ..."
+        note = (f"{len(segments)} on-stretch{'' if len(segments) == 1 else 'es'}, "
+                f"{on_time:.2f} s driven, PWM {shown}")
+        if PWM_FULL_SCALE and len(levels) == 1:
+            note += f" ({levels[0] / PWM_FULL_SCALE * 100.0:.0f}% duty)"
+    else:
+        note = "PWM never left zero"
+    _note(ax, note)
+    return _save(fig, outdir, "07_pwm")
+
+
+def plot_motor_angle(run, segments, outdir):
+    """Shaft angle against time, zeroed at the start of the run.
+
+    The encoder-count plot is the same data in the unit the sketch happens to
+    send; this is it in the unit the mechanism moves in, so the travel under
+    drive and the spring-back after MOTOR_OFF can be read straight off the axis.
+    """
+    import numpy as np
+
+    t = run["t"]
+    angle, label = angle_series(run["count"])
+
+    fig, (ax,) = _figure(1, height=4.2)
+    ax.plot(t, angle, color=C_COUNT, lw=1.6)
+    ax.axhline(0.0, color=GRID, lw=1.0)
+    _style_axes(ax, label)
+    ax.set_xlabel("Time (s)", color=INK, fontsize=9)
+    ax.set_title(f"{run['name']} - motor angle vs time", loc="left", color=INK,
+                 fontsize=11, pad=10)
+    _shade_on(ax, t, segments)
+    _headroom(ax)
+
+    if COUNTS_PER_REV:
+        ax2 = ax.twinx()
+        lo, hi = ax.get_ylim()
+        ax2.set_ylim(lo / 360.0, hi / 360.0)
+        _style_axes(ax2, "Revolutions")
+        ax2.grid(False)
+
+    unit = "deg" if COUNTS_PER_REV else "counts"
+    peak = angle[int(np.argmax(np.abs(angle)))] if angle.size else 0.0
+    note = f"peak {peak:,.1f} {unit}, final {angle[-1]:,.1f} {unit}"
+    if segments:
+        a, b = segments[0]
+        note += f", {angle[min(b, angle.size - 1)] - angle[a]:,.1f} {unit} under drive"
+    if not COUNTS_PER_REV:
+        note += "  (set COUNTS_PER_REV for degrees)"
+    _note(ax, note)
+    return _save(fig, outdir, "08_motor_angle")
+
+
 def plot_sampling(run, outdir):
     """Sample spacing - confirms the sketch actually logged at its target rate."""
     import numpy as np
@@ -581,6 +706,8 @@ def plot_run(csv_path):
         print("[plots] PWM never left zero - only the overview is meaningful")
     written.append(plot_sampling(run, outdir))
     written.append(plot_encoder_count(run, segments, outdir))
+    written.append(plot_pwm(run, segments, outdir))
+    written.append(plot_motor_angle(run, segments, outdir))
 
     written = [p for p in written if p]
     print(f"\n{len(written)} plot(s) in {outdir}")

@@ -34,5 +34,22 @@ Plots land in `Data/Plots/<run name>/`:
 | `03_current_vs_speed.png` | Current against speed while driven |
 | `04_steady_state_vs_pwm.png` | Steady-state speed and current per PWM level (runs with 2+ levels) |
 | `05_sample_interval.png` | Logging rate and any stalls |
+| `06_encoder_count.png` | Encoder count against time, at full height |
+| `07_pwm.png` | Commanded PWM against time, with a duty-cycle axis |
+| `08_motor_angle.png` | Shaft angle against time, zeroed at the start of the run |
 
-Set `COUNTS_PER_REV` at the top of `serialreader.py` to plot rev/min instead of counts/s.
+## Motor constants
+
+Set at the top of `serialreader.py` for the Pololu #4843 gearmotor (20.4:1
+25Dx65L mm HP 12 V, 48 CPR encoder):
+
+| Constant | Value | Effect |
+|---|---|---|
+| `ENCODER_CPR` | `48` | Counts per motor-shaft rev, all four quadrature edges |
+| `GEAR_RATIO` | `20.4` | Gearbox reduction |
+| `COUNTS_PER_REV` | `979.2` | Output-shaft counts/rev; puts speed in rev/min and angle in degrees |
+| `PWM_FULL_SCALE` | `255` | Sets the duty-cycle axis on the PWM plot |
+
+The sketch reads the encoder with `attachFullQuad`, so all four edges are
+counted and Pololu's 48 CPR figure applies directly. Set `COUNTS_PER_REV` to
+`None` to fall back to raw counts and counts/s.
